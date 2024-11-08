@@ -2,7 +2,7 @@
 this is a wonderful tool to manage your audio from a terminal no more pavucontrol
 
 ```
-https://github.com/schooldanlp6/marstui-rustio
+git clone https://github.com/schooldanlp6/marstui-rustio
 cd marstui-rustio
 cargo build --release
 cd target/release
