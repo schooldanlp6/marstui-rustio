@@ -1,6 +1,11 @@
 # marstui-rustio
 this is a wonderful tool to manage your audio from a terminal no more pavucontrol
 
+
+## building fails if not using these packages:
+sudo apt install libdbus-1-dev pkg-config
+
+
 ```
 git clone https://github.com/schooldanlp6/marstui-rustio
 cd marstui-rustio
