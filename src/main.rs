@@ -291,7 +291,7 @@ fn main() -> Result<()> {
         })?;
 
         // Handle key presses based on config
-        if event::poll(Duration::from_millis(10))? {
+        if event::poll(Duration::from_millis(30))? {
             if let event::Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char(c) if c == config.quit_key => break,
