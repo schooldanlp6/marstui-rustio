@@ -14,3 +14,7 @@ cd target/release
 chmod +x marstui-audio
 sudo cp marstui-audio /bin/marstui-audio
 ```
+## Small documentation
+The configuration is in ~/.config/marstui/audio.toml
+
+This is not supposed to be an interfacing library but can be treated as such and is in this repo: [Private]
