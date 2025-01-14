@@ -19,6 +19,12 @@ jobs:
     - name: Prepare Build env
       run: sudo apt install libdbus-1-dev pkg-config
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose --release
     - name: Run tests
       run: cargo test --verbose
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-artifacts
+        path: target/release/*
+
