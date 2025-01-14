@@ -19,6 +19,10 @@ The configuration is in ~/.config/marstui/audio.toml
 
 This is not supposed to be an interfacing library but can be treated as such and is in this repo: [Private]
 
+## roadmap
+- make a volume control interface and see how far a song played ☑️
+- add sink management 🏗️
+- add playback to sink control logic and management interface 🏗️
 
 ## Changelog
 ### V 2.1.0
