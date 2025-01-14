@@ -18,3 +18,12 @@ sudo cp marstui-audio /bin/marstui-audio
 The configuration is in ~/.config/marstui/audio.toml
 
 This is not supposed to be an interfacing library but can be treated as such and is in this repo: [Private]
+
+
+## Changelog
+### V 2.1.0
+- bumped dbus cargo dependency fixing errors
+
+### V 2.0.0
+- initial release
+- buggy in terms of streaming
