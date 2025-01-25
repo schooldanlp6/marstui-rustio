@@ -23,6 +23,7 @@ This is not supposed to be an interfacing library but can be treated as such and
 - make a volume control interface and see how far a song played ☑️
 - add sink management 🏗️
 - add playback to sink control logic and management interface 🏗️
+- fix the ISSUE on created file: -> You have to manually delete the config with a new version if config things changed
 
 ## Changelog
 ### V 2.1.0

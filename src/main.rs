@@ -35,6 +35,9 @@ struct Config {
     notplaying_fg: String,
     notplaying_bg: String,
     rounding: bool,
+    hide_controls: bool,
+    startpage: String,
+    change_page: char,
 }
 
 //We need the commander to pass to the main window, this should be left x, also add volume control and make the guide show the set values, add speaker selector per app and default, show the playing status
@@ -63,6 +66,9 @@ impl Default for Config {
             notplaying_fg: "White".to_string(),
             notplaying_bg: "Black".to_string(),
             rounding: true,
+            hide_controls: false, //Accepts true and false
+            startpage: "default".to_string(), //Supported are default, playback => same as default, sink => sink interface
+            change_page: 'y',
         }
     }
 }
@@ -163,175 +169,187 @@ fn main() -> Result<()> {
     //Load variables
     let mut eval = false;
     let volscopechange = 0.05;
+    let mut page = config.startpage;
 
     loop {
-        // Refresh the list of active players
-        let players: Vec<Player> = finder.find_all().unwrap_or_else(|_| vec![]);
-        let num_players = players.len();
-        let notplaying_fg = color_from_string(&config.notplaying_fg);
-        let notplaying_bg = color_from_string(&config.notplaying_bg);
-
-        // Check if there are active players
-        if num_players == 0 {
-            loop {
+    if page == "sink"{
+        let mut page = "sink".to_string();
+        
+        }
+        else{
+            // Refresh the list of active players
             let players: Vec<Player> = finder.find_all().unwrap_or_else(|_| vec![]);
             let num_players = players.len();
-            audio.draw(|f| {
-                let size = f.size();
-                let nothingplayingblock = Paragraph::new("Not Playing")
-                .block(Block::default().borders(Borders::ALL).title("Nothing Playing"))
-                .style(Style::default().fg(notplaying_fg).bg(notplaying_bg));
-            f.render_widget(nothingplayingblock, size);
-            })?;
+            let notplaying_fg = color_from_string(&config.notplaying_fg);
+            let notplaying_bg = color_from_string(&config.notplaying_bg);
 
-            if event::poll(Duration::from_millis(10))? {
-                if let event::Event::Key(key) = event::read()? {
-                    if key.code == KeyCode::Char(config.quit_key) {
-                        eval = true;
-                        break;
+            // Check if there are active players
+            if num_players == 0 {
+                loop {
+                let players: Vec<Player> = finder.find_all().unwrap_or_else(|_| vec![]);
+                let num_players = players.len();
+                audio.draw(|f| {
+                    let size = f.size();
+                    let nothingplayingblock = Paragraph::new("Not Playing")
+                    .block(Block::default().borders(Borders::ALL).title("Nothing Playing"))
+                    .style(Style::default().fg(notplaying_fg).bg(notplaying_bg));
+                f.render_widget(nothingplayingblock, size);
+                })?;
+
+                if event::poll(Duration::from_millis(10))? {
+                    if let event::Event::Key(key) = event::read()? {
+                        if key.code == KeyCode::Char(config.quit_key) {
+                            eval = true;
+                            break;
+                        }
                     }
                 }
+                thread::sleep(Duration::from_millis(10));
+                if num_players != 0{break;}
+                }
             }
-            thread::sleep(Duration::from_millis(10));
-            if num_players != 0{break;}
-            }
-        }
-//this is not ideal
+
+        //this is not ideal
         if eval{break;}
 
 
-        // Keep selected index within bounds
-        if selected_index >= num_players {
-            if selected_index != 0 {
-                selected_index = num_players - 1;   
-            }
-        }
-
-        // Adjust scroll to keep the selected index visible within the display limit
-        if selected_index < scroll_offset {
-            scroll_offset = selected_index;
-        } else if selected_index >= scroll_offset + display_limit {
-            scroll_offset = selected_index - display_limit + 1;
-        }
-
-        // Render TUI
-        audio.draw(|f| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(2)
-                .constraints(
-                    [
-                        Constraint::Length(3),  // Header
-                        Constraint::Min(4),    // Player list
-                        Constraint::Length(3),  // Controls
-                    ].as_ref()
-                )
-                .split(f.size());
-
-                let top_fg = color_from_string(&config.top_fg);
-                let top_bg = color_from_string(&config.top_bg);
-                let bottom_fg = color_from_string(&config.bottom_fg);
-                let bottom_bg = color_from_string(&config.bottom_bg);  
-
-            // Display the selected player's info in the header
-            if let Some(player) = players.get(selected_index) {
-                if let Some((title, player_name, progress, volume, playback)) = get_pl(player) {
-                    let rounding = config.rounding;
-                    let mut volnice = 0.0;
-                    drop(playback);
-                    if rounding == true {volnice = volume.round();}
-                    if rounding == false {volnice = volume;}
-                    let header_text = format!("{} - ({}) - {:.0}% - V: {}%", player_name, title, progress * 100.0, volnice);
-                    let header = Paragraph::new(header_text)
-                        .block(Block::default().borders(Borders::ALL).title("Currently Selected"))
-                        .style(Style::default().fg(top_fg).bg(top_bg));
-                    f.render_widget(header, chunks[0]);
+            // Keep selected index within bounds
+            if selected_index >= num_players {
+                if selected_index != 0 {
+                    selected_index = num_players - 1;   
                 }
             }
 
-            let selected_fg = color_from_string(&config.selected_fg);
-            let selected_bg = color_from_string(&config.selected_bg);
-            let unselected_fg = color_from_string(&config.unselected_fg);
-            let unselected_bg = color_from_string(&config.unselected_bg);             
-
-            // Render each player as a Gauge
-            let player_gauges: Vec<Gauge> = players.iter().enumerate().map(|(i, player)| {
-                if let Some((title, app_name, progress, volume, playback)) = get_pl(player) {
-                    Gauge::default()
-                        .block(Block::default().title(format!("{} - ({}) - V: {}% - {}", title, app_name, volume.round(), playback)))
-                        .gauge_style(Style::default().fg(if i == selected_index { selected_fg } else { unselected_fg }).bg(if i == selected_index { selected_bg } else { unselected_bg }))
-                        .ratio(progress)
-                } else {
-                    Gauge::default()
-                        .block(Block::default().title("Unknown or Unnamed song"))
-                        .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
-                        .ratio(0.0)
-                }
-            }).collect();
-
-            let visible_gauges = player_gauges.iter().skip(scroll_offset).take(display_limit);
-            let gauge_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(vec![Constraint::Length(2); display_limit])
-                .split(chunks[1]);
-
-            for (i, gauge) in visible_gauges.enumerate() {
-                f.render_widget(gauge.clone(), gauge_layout[i]);
+            // Adjust scroll to keep the selected index visible within the display limit
+            if selected_index < scroll_offset {
+                scroll_offset = selected_index;
+            } else if selected_index >= scroll_offset + display_limit {
+                scroll_offset = selected_index - display_limit + 1;
             }
 
-            // Render control instructions
-            let controls = Paragraph::new(format!(
-                "Controls: '{}': quit, '{}': next, '{}': previous, '{}': play/pause, '{}': up, '{}': down, vol up '{}', vol down '{}'",
-                config.quit_key, config.next_key, config.previous_key, config.play_pause_key, config.move_up_key, config.move_down_key, config.volup, config.voldown,
-            ))
-            .block(Block::default().borders(Borders::ALL).title("Controls"))
-            .style(Style::default().fg(bottom_fg).bg(bottom_bg));
+            // Render TUI
+            audio.draw(|f| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .margin(2)
+                    .constraints(
+                        [
+                            Constraint::Length(3),  // Header
+                            Constraint::Min(4),    // Player list
+                            Constraint::Length(3),  // Controls
+                        ].as_ref()
+                    )
+                    .split(f.size());
 
-            f.render_widget(controls, chunks[2]);
-        })?;
+                    let top_fg = color_from_string(&config.top_fg);
+                    let top_bg = color_from_string(&config.top_bg);
+                    let bottom_fg = color_from_string(&config.bottom_fg);
+                    let bottom_bg = color_from_string(&config.bottom_bg);  
 
-        // Handle key presses based on config
-        if event::poll(Duration::from_millis(10))? {
-            if let event::Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char(c) if c == config.quit_key => break,
-                    KeyCode::Char(c) if c == config.volup => {
-                        set_vol(&players, volscopechange, selected_index);
+                // Display the selected player's info in the header
+                if let Some(player) = players.get(selected_index) {
+                    if let Some((title, player_name, progress, volume, playback)) = get_pl(player) {
+                        let rounding = config.rounding;
+                        let mut volnice = 0.0;
+                        drop(playback);
+                        if rounding == true {volnice = volume.round();}
+                        if rounding == false {volnice = volume;}
+                        let header_text = format!("{} - ({}) - {:.0}% - V: {}%", player_name, title, progress * 100.0, volnice);
+                        let header = Paragraph::new(header_text)
+                            .block(Block::default().borders(Borders::ALL).title("Currently Selected"))
+                            .style(Style::default().fg(top_fg).bg(top_bg));
+                        f.render_widget(header, chunks[0]);
                     }
-                    KeyCode::Char(c) if c == config.voldown => {
-                        set_vol(&players, -volscopechange, selected_index);
+                }
+
+                let selected_fg = color_from_string(&config.selected_fg);
+                let selected_bg = color_from_string(&config.selected_bg);
+                let unselected_fg = color_from_string(&config.unselected_fg);
+                let unselected_bg = color_from_string(&config.unselected_bg);             
+
+                // Render each player as a Gauge
+                let player_gauges: Vec<Gauge> = players.iter().enumerate().map(|(i, player)| {
+                    if let Some((title, app_name, progress, volume, playback)) = get_pl(player) {
+                        Gauge::default()
+                            .block(Block::default().title(format!("{} - ({}) - V: {}% - {}", title, app_name, volume.round(), playback)))
+                            .gauge_style(Style::default().fg(if i == selected_index { selected_fg } else { unselected_fg }).bg(if i == selected_index { selected_bg } else { unselected_bg }))
+                            .ratio(progress)
+                    } else {
+                        Gauge::default()
+                            .block(Block::default().title("Unknown or Unnamed song"))
+                            .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
+                            .ratio(0.0)
                     }
-                    KeyCode::Char(c) if c == config.Xommander => break, //do something for Xommander,
-                    KeyCode::Char(c) if c == config.next_key => {
-                        if let Some(player) = players.get(selected_index) {
-                            player.next().ok();
+                }).collect();
+
+                let visible_gauges = player_gauges.iter().skip(scroll_offset).take(display_limit);
+                let gauge_layout = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints(vec![Constraint::Length(2); display_limit])
+                    .split(chunks[1]);
+
+                for (i, gauge) in visible_gauges.enumerate() {
+                    f.render_widget(gauge.clone(), gauge_layout[i]);
+                }
+
+                // Render control instructions
+                if (!config.hide_controls){
+                let controls = Paragraph::new(format!(
+                    "Controls: '{}': quit, '{}': next, '{}': previous, '{}': play/pause, '{}': up, '{}': down, vol up '{}', vol down '{}' change page '{}'",
+                    config.quit_key, config.next_key, config.previous_key, config.play_pause_key, config.move_up_key, config.move_down_key, config.volup, config.voldown, config.change_page,
+                ))
+                .block(Block::default().borders(Borders::ALL).title("Controls"))
+                .style(Style::default().fg(bottom_fg).bg(bottom_bg));
+        
+                f.render_widget(controls, chunks[2]);}
+            })?;
+
+            // Handle key presses based on config
+            if event::poll(Duration::from_millis(10))? {
+                if let event::Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Char(c) if c == config.quit_key => break,
+                        KeyCode::Char(c) if c == config.volup => {
+                            set_vol(&players, volscopechange, selected_index);
                         }
-                    }
-                    KeyCode::Char(c) if c == config.previous_key => {
-                        if let Some(player) = players.get(selected_index) {
-                            player.previous().ok();
+                        KeyCode::Char(c) if c == config.voldown => {
+                            set_vol(&players, -volscopechange, selected_index);
                         }
-                    }
-                    KeyCode::Char(c) if c == config.play_pause_key => {
-                        if let Some(player) = players.get(selected_index) {
-                            match player.get_playback_status() {
-                                Ok(PlaybackStatus::Playing) => { player.pause().ok(); },
-                                _ => { player.play().ok(); },
-                            }                            
+                        KeyCode::Char(c) if c == config.Xommander => break, //do something for Xommander,
+                        KeyCode::Char(c) if c == config.next_key => {
+                            if let Some(player) = players.get(selected_index) {
+                                player.next().ok();
+                            }
                         }
+                        KeyCode::Char(c) if c == config.previous_key => {
+                            if let Some(player) = players.get(selected_index) {
+                                player.previous().ok();
+                            }
+                        }
+                        KeyCode::Char(c) if c == config.play_pause_key => {
+                            if let Some(player) = players.get(selected_index) {
+                                match player.get_playback_status() {
+                                    Ok(PlaybackStatus::Playing) => { player.pause().ok(); },
+                                    _ => { player.play().ok(); },
+                                }                            
+                            }
+                        }
+                        KeyCode::Char(c) if c == config.move_up_key => {
+                            if selected_index > 0 { selected_index -= 1; }
+                        }
+                        KeyCode::Char(c) if c == config.move_down_key => {
+                            if selected_index < num_players - 1 { selected_index += 1; }
+                        }
+                        KeyCode::Char(c) if c == config.change_page => {
+                            if  page != "sink"{page = "sink".to_string(); }
+                        }
+                        _ => {}
                     }
-                    KeyCode::Char(c) if c == config.move_up_key => {
-                        if selected_index > 0 { selected_index -= 1; }
-                    }
-                    KeyCode::Char(c) if c == config.move_down_key => {
-                        if selected_index < num_players - 1 { selected_index += 1; }
-                    }
-                    _ => {}
                 }
             }
+
+            thread::sleep(Duration::from_millis(10));
         }
-
-        thread::sleep(Duration::from_millis(10));
     }
 
     disable_raw_mode()?;
