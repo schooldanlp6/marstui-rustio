@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, thread, time::Duration};
+use std::{thread, time::Duration};
 use tui::{
     backend::CrosstermBackend, layout::{Constraint, Direction, Layout}, style::{Color, Style}, widgets::{Block, Borders, Gauge, Paragraph}, Terminal
 };
@@ -8,177 +8,14 @@ use crossterm::{
 use zbus::{zvariant::Str, Result};
 use std::io::{self};
 use mpris::{PlaybackStatus, Player, PlayerFinder};
-use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::mem::drop;
 use std::time::Instant;
 
-/// Configuration structure for the application
-#[derive(Deserialize, Serialize, Debug)]
-#[serde(default)]
-struct Config {
-    quit_key: char,
-    Xommander: char,
-    next_key: char,
-    previous_key: char,
-    play_pause_key: char,
-    move_up_key: char,
-    move_down_key: char,
-    volup: char,
-    voldown: char,
-    selected_fg: String,
-    selected_bg: String,
-    unselected_fg: String,
-    unselected_bg: String,
-    top_fg: String,
-    top_bg: String,
-    bottom_fg: String,
-    bottom_bg: String,
-    notplaying_fg: String,
-    notplaying_bg: String,
-    rounding: bool,
-    hide_controls: bool,
-    startpage: String,
-    refresh_interval: u64, //in ms
-    change_page: char,
-}
-
-#[derive(Clone)]
-struct PlayerCache {
-    title: String,
-    player_name: String,
-    progress: f64,
-    volume: f64,
-    playback: String,
-    last_updated: Instant,
-}
-
-//We need the commander to pass to the main window, this should be left x, also add volume control and make the guide show the set values, add speaker selector per app and default, show the playing status
-/// Default configuration values refresh is 300ms
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            quit_key: 'q',
-            Xommander: 'x',
-            next_key: 'n',
-            previous_key: 'b',
-            play_pause_key: 'm',
-            move_up_key: 'c',
-            move_down_key: 'v',
-            volup: '+',
-            voldown: '-',
-            selected_fg: "White".to_string(),
-            selected_bg: "Black".to_string(),
-            unselected_fg: "Gray".to_string(),
-            unselected_bg: "Black".to_string(),
-            top_fg: "White".to_string(),
-            top_bg: "Black".to_string(),
-            bottom_fg: "Gray".to_string(),
-            bottom_bg: "Black".to_string(),
-            notplaying_fg: "White".to_string(),
-            notplaying_bg: "Black".to_string(),
-            rounding: true,
-            hide_controls: false, //Accepts true and false
-            startpage: "default".to_string(), //Supported are default, playback => same as default, sink => sink interface
-            refresh_interval: 600,
-            change_page: 'y',
-        }
-    }
-}
-
-///Load config file in a not scuffed way
-fn load_config() -> Config {
-    let config_path = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("marstui/audio.toml");
-
-    if !config_path.exists() {
-        // Config doesn't exist, write default
-        let default_config = Config::default();
-        let config_toml = toml::to_string(&default_config).unwrap();
-        fs::create_dir_all(config_path.parent().unwrap()).expect("Failed to create config directory");
-        fs::write(&config_path, config_toml).expect("Failed to write default config file");
-        default_config
-    } else {
-        // Config exists, try to read & parse
-        let config_content = fs::read_to_string(&config_path).unwrap_or_default();
-        match toml::from_str::<Config>(&config_content) {
-            Ok(cfg) => cfg, // Successfully loaded, return it
-            Err(e) => {
-                eprintln!("Warning: failed to parse config, backing up and using defaults: {}", e);
-
-                // Backup the invalid file
-                let backup_path = config_path.with_extension("backup");
-                let _ = fs::copy(&config_path, &backup_path);
-
-                // Return defaults
-                Config::default()
-            }
-        }
-    }
-}
-
-//Get Players from mpris
-fn get_pl(player: &Player, cache: &mut Option<PlayerCache>, refresh_ms: u64) -> Option<PlayerCache> {
-    let now = Instant::now();
-    if let Some(pl) = cache {
-        if now.duration_since(pl.last_updated).as_millis() < refresh_ms as u128 {
-            return cache.clone(); // skip DBus query
-        }
-    }
-
-    if let Ok(metadata) = player.get_metadata() {
-        let title = metadata.title().unwrap_or("Unknown Title").to_string();
-        let player_name = player.identity().to_string();
-        let length = metadata.length().map_or(0.0, |l| l.as_secs_f64());
-        let position = player.get_position().map_or(0.0, |p| p.as_secs_f64());
-        let progress = if length > 0.0 { position / length } else { 0.0 };
-        let volume = player.get_volume().unwrap_or(0.22) * 100.0;
-        let playback = "not implemented".to_string();
-
-        let new_cache = PlayerCache {
-            title,
-            player_name,
-            progress,
-            volume,
-            playback,
-            last_updated: now,
-        };
-        *cache = Some(new_cache);
-    }
-    cache.clone()
-}
-
-
-fn set_vol(players: &[Player], change: f64, selected_index: usize) {
-    if let Some(player) = players.get(selected_index) {
-        // Get the current volume from the player
-        let volnow = match player.get_volume() {Ok(volume) => volume,Err(_) => 0.22,};
-        let volnew = (volnow + change).clamp(0.0, 1.0);
-        let mut failed;
-        if let Err(newvol) = player.set_volume(volnew){failed = newvol;}else{let failed = "notfailed";}
-    }
-}
-
-
-
-// added undocumented color schem nc means no color
-fn color_from_string(color_str: &str) -> Color {
-    match color_str.to_lowercase().as_str() {
-        "black" => Color::Black,
-        "red" => Color::Red,
-        "green" => Color::Green,
-        "yellow" => Color::Yellow,
-        "blue" => Color::Blue,
-        "magenta" => Color::Magenta,
-        "cyan" => Color::Cyan,
-        "white" => Color::White,
-        "grey" => Color::Gray,
-        "gray" => Color::Gray,
-        "nc" => Color::Reset,
-        _ => Color::Reset,  // Default to Reset if the color is not recognized
-    }
-}
+mod config;
+use config::load_config;
+mod audio;
+use audio::*;
 
 fn main() -> Result<()> {
     // Load config
