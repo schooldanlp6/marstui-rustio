@@ -39,7 +39,7 @@ struct Config {
     rounding: bool,
     hide_controls: bool,
     startpage: String,
-//    refresh_interval u64,
+    refresh_interval: u64, //in ms
     change_page: char,
 }
 
@@ -50,6 +50,7 @@ struct PlayerCache {
     progress: f64,
     volume: f64,
     playback: String,
+    last_updated: Instant,
 }
 
 //We need the commander to pass to the main window, this should be left x, also add volume control and make the guide show the set values, add speaker selector per app and default, show the playing status
@@ -79,7 +80,7 @@ impl Default for Config {
             rounding: true,
             hide_controls: false, //Accepts true and false
             startpage: "default".to_string(), //Supported are default, playback => same as default, sink => sink interface
-//            refresh_interval: "300",
+            refresh_interval: 600,
             change_page: 'y',
         }
     }
@@ -92,57 +93,40 @@ fn load_config() -> Config {
         .join("marstui/audio.toml");
 
     if !config_path.exists() {
-        // Write a full default config if missing
+        // Config doesn't exist, write default
         let default_config = Config::default();
         let config_toml = toml::to_string(&default_config).unwrap();
         fs::create_dir_all(config_path.parent().unwrap()).expect("Failed to create config directory");
         fs::write(&config_path, config_toml).expect("Failed to write default config file");
         default_config
     } else {
-        // Backup old config
-        let _ = Command::new("mv")
-            .arg(&config_path)
-            .arg(config_path.with_extension("backup"))
-            .output();
-
+        // Config exists, try to read & parse
         let config_content = fs::read_to_string(&config_path).unwrap_or_default();
+        match toml::from_str::<Config>(&config_content) {
+            Ok(cfg) => cfg, // Successfully loaded, return it
+            Err(e) => {
+                eprintln!("Warning: failed to parse config, backing up and using defaults: {}", e);
 
-        // Deserialize with partial defaults
-        let config: Config = toml::from_str(&config_content).unwrap_or_else(|e| {
-            eprintln!("Warning: Config file partially invalid, using defaults for missing fields. Error: {}", e);
-            Config::default()
-        });
+                // Backup the invalid file
+                let backup_path = config_path.with_extension("backup");
+                let _ = fs::copy(&config_path, &backup_path);
 
-        config
+                // Return defaults
+                Config::default()
+            }
+        }
     }
 }
 
-/*
-/// Load or create configuration file
-fn load_config() -> Config {
-    let config_path = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("marstui/audio.toml");
-
-    if !config_path.exists() {
-        let default_config = Config::default();
-        let config_toml = toml::to_string(&default_config).unwrap();
-        fs::create_dir_all(config_path.parent().unwrap()).expect("Failed to create config directory");
-        fs::write(&config_path, config_toml).expect("Failed to write default config file");
-        default_config
-    } else {
-        //lets take a backup and kill the file
-        let junk = Command::new("mv .config/marstui/audio.toml .config/marstui/audio.backup").arg("-l").output();//.expect("Nothing Like my life");
-        drop(junk); //we do this because this is working not elegant but working
-        let config_content = fs::read_to_string(&config_path).expect("Failed to read config file");
-        toml::from_str(&config_content).expect("Failed to parse config file");
-        Config::default;
-        config;
+//Get Players from mpris
+fn get_pl(player: &Player, cache: &mut Option<PlayerCache>, refresh_ms: u64) -> Option<PlayerCache> {
+    let now = Instant::now();
+    if let Some(pl) = cache {
+        if now.duration_since(pl.last_updated).as_millis() < refresh_ms as u128 {
+            return cache.clone(); // skip DBus query
+        }
     }
-}*/
 
-/// Get song information, including title, player name, and progress percentage.
-fn get_pl(player: &Player, cache: &mut Option<PlayerCache>) -> Option<PlayerCache> {
     if let Ok(metadata) = player.get_metadata() {
         let title = metadata.title().unwrap_or("Unknown Title").to_string();
         let player_name = player.identity().to_string();
@@ -158,6 +142,7 @@ fn get_pl(player: &Player, cache: &mut Option<PlayerCache>) -> Option<PlayerCach
             progress,
             volume,
             playback,
+            last_updated: now,
         };
         *cache = Some(new_cache);
     }
@@ -177,9 +162,7 @@ fn set_vol(players: &[Player], change: f64, selected_index: usize) {
 
 
 
-// DO proper indexing and rewrite of the main function
 // added undocumented color schem nc means no color
-
 fn color_from_string(color_str: &str) -> Color {
     match color_str.to_lowercase().as_str() {
         "black" => Color::Black,
@@ -197,10 +180,10 @@ fn color_from_string(color_str: &str) -> Color {
     }
 }
 
-
 fn main() -> Result<()> {
     // Load config
     let config = load_config();
+    let refresh_ms = config.refresh_interval;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -212,266 +195,200 @@ fn main() -> Result<()> {
     // Initialize PlayerFinder
     let finder = PlayerFinder::new().unwrap();
     let mut caches: Vec<Option<PlayerCache>> = Vec::new();
-    let mut last_update = Instant::now();
-    let refresh_interval = Duration::from_millis(3000); // Adjust frequency
     let mut last_player_refresh = Instant::now();
-    let mut last_draw = Instant::now();
 
-    // Load Variables
+    // Load variables
     let mut selected_index = 0;
     let mut scroll_offset = 0;
     let display_limit = 16;
-
-    let mut eval = false;
     let volscopechange = 0.05;
     let mut page = config.startpage;
     let mut players = finder.find_all().unwrap_or_default();
     if caches.len() != players.len() {
-            caches.resize_with(players.len(), || None);
+        caches.resize_with(players.len(), || None);
     }
     if !players.is_empty() && selected_index >= players.len() {
-       selected_index = players.len() - 1;
+        selected_index = players.len() - 1;
     }
 
-        let mut last_refresh = Instant::now();
-    if last_update.elapsed() >= refresh_interval {
-        let mut players = finder.find_all().unwrap_or_default();
-        if caches.len() != players.len() {
-            caches.resize_with(players.len(), || None);
-        }
-        if !players.is_empty() && selected_index >= players.len() {
-           selected_index = players.len() - 1;
-        }
-        // Update each player's cache
-        for (i, player) in players.iter().enumerate() {
-            get_pl(player, &mut caches[i]);
-        }
-        last_update = Instant::now();
-    }
+    let mut eval = false;
 
     loop {
-    if last_player_refresh.elapsed() >= Duration::from_secs(1) {
-        players = finder.find_all().unwrap_or_default();
-
-        if caches.len() != players.len() {
-            caches.resize_with(players.len(), || None);
+        // Refresh player list at most once per second
+        if last_player_refresh.elapsed() >= Duration::from_secs(1) {
+            players = finder.find_all().unwrap_or_default();
+            if caches.len() != players.len() {
+                caches.resize_with(players.len(), || None);
+            }
+            last_player_refresh = Instant::now();
         }
 
-        for (i, player) in players.iter().enumerate() {
-            get_pl(player, &mut caches[i]); // DBus query
-        }
-
-        last_player_refresh = Instant::now();
-    }
-    
-    if page == "sink"{
-        let mut page = "sink".to_string();
-        
-        }
-        }
-        else{
-            // Refresh the list of active players
-            let mut players: Vec<Player> = finder.find_all().unwrap_or_else(|_| vec![]);
-            let num_players = players.len();
+        // If no players, show "Not Playing"
+        if players.is_empty() {
             let notplaying_fg = color_from_string(&config.notplaying_fg);
             let notplaying_bg = color_from_string(&config.notplaying_bg);
 
-            // Check if there are active players
-            if num_players == 0 {
-                loop {
-                // Refresh player list at most once per second
-                if last_refresh.elapsed() > Duration::from_secs(1) {
-                    last_refresh = Instant::now();
-                    players = finder.find_all().unwrap_or_else(|_| vec![]);
-                }
-
-                // Ensure cache vector has same length as players
-                while caches.len() < players.len() {
-                    caches.push(None);
-                }
-                let num_players = players.len();
-
-                audio.draw(|f| {
-                    let size = f.size();
-                    let nothingplayingblock = Paragraph::new("Not Playing")
+            audio.draw(|f| {
+                let size = f.size();
+                let nothingplayingblock = Paragraph::new("Not Playing")
                     .block(Block::default().borders(Borders::ALL).title("Nothing Playing"))
                     .style(Style::default().fg(notplaying_fg).bg(notplaying_bg));
                 f.render_widget(nothingplayingblock, size);
-                })?;
+            })?;
 
-                if event::poll(Duration::from_millis(10))? {
-                    if let event::Event::Key(key) = event::read()? {
-                        if key.code == KeyCode::Char(config.quit_key) {
-                            eval = true;
-                            break;
-                        }
+            // Quit key check even when nothing is playing
+            if event::poll(Duration::from_millis(10))? {
+                if let event::Event::Key(key) = event::read()? {
+                    if key.code == KeyCode::Char(config.quit_key) {
+                        break;
                     }
                 }
-                thread::sleep(Duration::from_millis(10));
-                if num_players != 0{break;}
-                }
             }
-
-        //this is not ideal
-        if eval{break;}
-
-
-            // Keep selected index within bounds
-            if selected_index >= num_players {
-                if selected_index != 0 {
-                    selected_index = num_players - 1;   
-                }
-            }
-
-            // Adjust scroll to keep the selected index visible within the display limit
-            if selected_index < scroll_offset {
-                scroll_offset = selected_index;
-            } else if selected_index >= scroll_offset + display_limit {
-                scroll_offset = selected_index - display_limit + 1;
-            }
-
-            // Render TUI
-            audio.draw(|f| {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .margin(2)
-                    .constraints(
-                        [
-                            Constraint::Length(3),  // Header
-                            Constraint::Min(4),     // Player list
-                            Constraint::Length(3),  // Controls
-                        ]
-                        .as_ref(),
-                    )
-                    .split(f.size());
-
-                    let top_fg = color_from_string(&config.top_fg);
-                    let top_bg = color_from_string(&config.top_bg);
-                    let bottom_fg = color_from_string(&config.bottom_fg);
-                    let bottom_bg = color_from_string(&config.bottom_bg);
-
-    // Display selected player in header
-    if let Some(player) = players.get(selected_index) {
-        if let Some(pl) = get_pl(player, &mut caches[selected_index]) {
-            let title = &pl.title;
-            let player_name = &pl.player_name;
-            let progress = pl.progress;
-            let mut volume = pl.volume;
-
-            let rounding = config.rounding;
-            if rounding {
-                volume = volume.round();
-            }
-
-            let header_text = format!(
-                "{} - ({}) - {:.0}% - V: {}%",
-                player_name,
-                title,
-                progress * 100.0,
-                volume
-            );
-            let header = Paragraph::new(header_text)
-                .block(Block::default().borders(Borders::ALL).title("Currently Selected"))
-                .style(Style::default().fg(top_fg).bg(top_bg));
-            f.render_widget(header, chunks[0]);
+            thread::sleep(Duration::from_millis(10));
+            continue;
         }
-    }
 
-                let selected_fg = color_from_string(&config.selected_fg);
-                let selected_bg = color_from_string(&config.selected_bg);
-                let unselected_fg = color_from_string(&config.unselected_fg);
-                let unselected_bg = color_from_string(&config.unselected_bg);             
+        let num_players = players.len();
 
-                // Render each player as a Gauge
-                let player_gauges: Vec<Gauge> = players.iter().enumerate().map(|(i, player)| {
-                    if let Some(pl) = get_pl(player, &mut caches[i]) {
-                        let title = &pl.title;
-                        let app_name = &pl.player_name;
-                        let progress = pl.progress;
-                        let volume = pl.volume;
-                        let playback = &pl.playback;
-                        Gauge::default()
-                            .block(Block::default().title(format!("{} - ({}) - V: {}% - {}", title, app_name, volume.round(), playback)))
-                            .gauge_style(Style::default().fg(if i == selected_index { selected_fg } else { unselected_fg }).bg(if i == selected_index { selected_bg } else { unselected_bg }))
-                            .ratio(progress)
-                    } else {
-                        Gauge::default()
-                            .block(Block::default().title("Unknown or Unnamed song"))
-                            .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
-                            .ratio(0.0)
+        // Keep selected index within bounds
+        if !players.is_empty() && selected_index >= num_players {
+            selected_index = num_players - 1;
+        }
+
+        // Adjust scroll to keep the selected index visible
+        if selected_index < scroll_offset {
+            scroll_offset = selected_index;
+        } else if selected_index >= scroll_offset + display_limit {
+            scroll_offset = selected_index - display_limit + 1;
+        }
+
+        // Draw UI
+        audio.draw(|f| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(2)
+                .constraints([
+                    Constraint::Length(3),  // Header
+                    Constraint::Min(4),     // Player list
+                    Constraint::Length(3),  // Controls
+                ].as_ref())
+                .split(f.size());
+
+            let top_fg = color_from_string(&config.top_fg);
+            let top_bg = color_from_string(&config.top_bg);
+            let bottom_fg = color_from_string(&config.bottom_fg);
+            let bottom_bg = color_from_string(&config.bottom_bg);
+            let selected_fg = color_from_string(&config.selected_fg);
+            let selected_bg = color_from_string(&config.selected_bg);
+            let unselected_fg = color_from_string(&config.unselected_fg);
+            let unselected_bg = color_from_string(&config.unselected_bg);
+
+            // Header for selected player
+            if let Some(player) = players.get(selected_index) {
+                if let Some(pl) = get_pl(player, &mut caches[selected_index], refresh_ms) {
+                    let title = &pl.title;
+                    let player_name = &pl.player_name;
+                    let progress = pl.progress;
+                    let mut volume = pl.volume;
+                    if config.rounding {
+                        volume = volume.round();
                     }
-                }).collect();
 
-                let visible_gauges = player_gauges.iter().skip(scroll_offset).take(display_limit);
-                let gauge_layout = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints(vec![Constraint::Length(2); display_limit])
-                    .split(chunks[1]);
+                    let header_text = format!(
+                        "{} - ({}) - {:.0}% - V: {}%",
+                        player_name, title, progress * 100.0, volume
+                    );
 
-                for (i, gauge) in visible_gauges.enumerate() {
-                    f.render_widget(gauge.clone(), gauge_layout[i]);
+                    let header = Paragraph::new(header_text)
+                        .block(Block::default().borders(Borders::ALL).title("Currently Selected"))
+                        .style(Style::default().fg(top_fg).bg(top_bg));
+
+                    f.render_widget(header, chunks[0]);
                 }
+            }
 
-                // Render control instructions
-                if (!config.hide_controls){
+            // Player list
+            let player_gauges: Vec<Gauge> = players.iter().enumerate().map(|(i, player)| {
+                if let Some(pl) = get_pl(player, &mut caches[i], refresh_ms) {
+                    let title = &pl.title;
+                    let app_name = &pl.player_name;
+                    let progress = pl.progress;
+                    let volume = pl.volume;
+                    let playback = &pl.playback;
+
+                    Gauge::default()
+                        .block(Block::default().title(format!(
+                            "{} - ({}) - V: {}% - {}",
+                            title, app_name, volume.round(), playback
+                        )))
+                        .gauge_style(
+                            Style::default()
+                                .fg(if i == selected_index { selected_fg } else { unselected_fg })
+                                .bg(if i == selected_index { selected_bg } else { unselected_bg })
+                        )
+                        .ratio(progress)
+                } else {
+                    Gauge::default()
+                        .block(Block::default().title("Unknown or Unnamed song"))
+                        .gauge_style(Style::default().fg(Color::White).bg(Color::Black))
+                        .ratio(0.0)
+                }
+            }).collect();
+
+            let visible_gauges = player_gauges.iter().skip(scroll_offset).take(display_limit);
+            let gauge_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(vec![Constraint::Length(2); display_limit])
+                .split(chunks[1]);
+
+            for (i, gauge) in visible_gauges.enumerate() {
+                f.render_widget(gauge.clone(), gauge_layout[i]);
+            }
+
+            // Controls bar (only if hide_controls = false)
+            if !config.hide_controls {
                 let controls = Paragraph::new(format!(
                     "Controls: '{}': quit, '{}': next, '{}': previous, '{}': play/pause, '{}': up, '{}': down, vol up '{}', vol down '{}' change page '{}'",
-                    config.quit_key, config.next_key, config.previous_key, config.play_pause_key, config.move_up_key, config.move_down_key, config.volup, config.voldown, config.change_page,
+                    config.quit_key, config.next_key, config.previous_key, config.play_pause_key,
+                    config.move_up_key, config.move_down_key, config.volup, config.voldown, config.change_page,
                 ))
                 .block(Block::default().borders(Borders::ALL).title("Controls"))
                 .style(Style::default().fg(bottom_fg).bg(bottom_bg));
-        
-                f.render_widget(controls, chunks[2]);}
-            })?;
 
-            // Handle key presses based on config
-            if event::poll(Duration::from_millis(10))? {
-                if let event::Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char(c) if c == config.quit_key => break,
-                        KeyCode::Char(c) if c == config.volup => {
-                            set_vol(&players, volscopechange, selected_index);
-                        }
-                        KeyCode::Char(c) if c == config.voldown => {
-                            set_vol(&players, -volscopechange, selected_index);
-                        }
-                        KeyCode::Char(c) if c == config.Xommander => break, //do something for Xommander,
-                        KeyCode::Char(c) if c == config.next_key => {
-                            if let Some(player) = players.get(selected_index) {
-                                player.next().ok();
+                f.render_widget(controls, chunks[2]);
+            }
+        })?;
+
+        // Handle key presses
+        if event::poll(Duration::from_millis(10))? {
+            if let event::Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char(c) if c == config.quit_key => break,
+                    KeyCode::Char(c) if c == config.volup => set_vol(&players, volscopechange, selected_index),
+                    KeyCode::Char(c) if c == config.voldown => set_vol(&players, -volscopechange, selected_index),
+                    KeyCode::Char(c) if c == config.Xommander => break,
+                    KeyCode::Char(c) if c == config.next_key => { players.get(selected_index).map(|p| p.next().ok()); },
+                    KeyCode::Char(c) if c == config.previous_key => { players.get(selected_index).map(|p| p.previous().ok()); },
+                    KeyCode::Char(c) if c == config.play_pause_key => {
+                        if let Some(player) = players.get(selected_index) {
+                            match player.get_playback_status() {
+                                Ok(PlaybackStatus::Playing) => { player.pause().ok(); },
+                                _ => { player.play().ok(); },
                             }
                         }
-                        KeyCode::Char(c) if c == config.previous_key => {
-                            if let Some(player) = players.get(selected_index) {
-                                player.previous().ok();
-                            }
-                        }
-                        KeyCode::Char(c) if c == config.play_pause_key => {
-                            if let Some(player) = players.get(selected_index) {
-                                match player.get_playback_status() {
-                                    Ok(PlaybackStatus::Playing) => { player.pause().ok(); },
-                                    _ => { player.play().ok(); },
-                                }                            
-                            }
-                        }
-                        KeyCode::Char(c) if c == config.move_up_key => {
-                            if selected_index > 0 { selected_index -= 1; }
-                        }
-                        KeyCode::Char(c) if c == config.move_down_key => {
-                            if selected_index < num_players - 1 { selected_index += 1; }
-                        }
-                        KeyCode::Char(c) if c == config.change_page => {
-                            if  page != "sink"{page = "sink".to_string(); }
-                        }
-                        _ => {}
-                    }
+                    },
+                    KeyCode::Char(c) if c == config.move_up_key => { if selected_index > 0 { selected_index -= 1; } },
+                    KeyCode::Char(c) if c == config.move_down_key => { if selected_index < num_players - 1 { selected_index += 1; } },
+                    KeyCode::Char(c) if c == config.change_page => { if page != "sink" { page = "sink".to_string(); } },
+                    _ => {}
                 }
             }
-
-            thread::sleep(Duration::from_millis(10));
         }
+
+        thread::sleep(Duration::from_millis(10));
     }
 
+    // Cleanup
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     audio.show_cursor()?;
