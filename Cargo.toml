@@ -1,13 +1,13 @@
 [package]
 name = "marstui-audio"
-version = "2.1.1-dev"
-edition = "2021"
+version = "2.2.0"
+edition = "2024"
 
 [dependencies]
 tui = "0.19.0"
 crossterm = "0.23"
 mpris = "2.0.1"
-zbus = "5.1.1"
-serde = "1.0.214"
-dirs = "4.0.0"
+zbus = "5.6.0"
+serde = "1.0.216"
+dirs = "6.0.0"
 toml = "0.5.11"

@@ -11,9 +11,11 @@ use mpris::{PlaybackStatus, Player, PlayerFinder};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::mem::drop;
+use std::time::Instant;
 
 /// Configuration structure for the application
 #[derive(Deserialize, Serialize, Debug)]
+#[serde(default)]
 struct Config {
     quit_key: char,
     Xommander: char,
@@ -37,12 +39,21 @@ struct Config {
     rounding: bool,
     hide_controls: bool,
     startpage: String,
+//    refresh_interval u64,
     change_page: char,
 }
 
-//We need the commander to pass to the main window, this should be left x, also add volume control and make the guide show the set values, add speaker selector per app and default, show the playing status
+#[derive(Clone)]
+struct PlayerCache {
+    title: String,
+    player_name: String,
+    progress: f64,
+    volume: f64,
+    playback: String,
+}
 
-/// Default configuration values
+//We need the commander to pass to the main window, this should be left x, also add volume control and make the guide show the set values, add speaker selector per app and default, show the playing status
+/// Default configuration values refresh is 300ms
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -68,11 +79,45 @@ impl Default for Config {
             rounding: true,
             hide_controls: false, //Accepts true and false
             startpage: "default".to_string(), //Supported are default, playback => same as default, sink => sink interface
+//            refresh_interval: "300",
             change_page: 'y',
         }
     }
 }
 
+///Load config file in a not scuffed way
+fn load_config() -> Config {
+    let config_path = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("marstui/audio.toml");
+
+    if !config_path.exists() {
+        // Write a full default config if missing
+        let default_config = Config::default();
+        let config_toml = toml::to_string(&default_config).unwrap();
+        fs::create_dir_all(config_path.parent().unwrap()).expect("Failed to create config directory");
+        fs::write(&config_path, config_toml).expect("Failed to write default config file");
+        default_config
+    } else {
+        // Backup old config
+        let _ = Command::new("mv")
+            .arg(&config_path)
+            .arg(config_path.with_extension("backup"))
+            .output();
+
+        let config_content = fs::read_to_string(&config_path).unwrap_or_default();
+
+        // Deserialize with partial defaults
+        let config: Config = toml::from_str(&config_content).unwrap_or_else(|e| {
+            eprintln!("Warning: Config file partially invalid, using defaults for missing fields. Error: {}", e);
+            Config::default()
+        });
+
+        config
+    }
+}
+
+/*
 /// Load or create configuration file
 fn load_config() -> Config {
     let config_path = dirs::config_dir()
@@ -90,28 +135,33 @@ fn load_config() -> Config {
         let junk = Command::new("mv .config/marstui/audio.toml .config/marstui/audio.backup").arg("-l").output();//.expect("Nothing Like my life");
         drop(junk); //we do this because this is working not elegant but working
         let config_content = fs::read_to_string(&config_path).expect("Failed to read config file");
-        toml::from_str(&config_content).expect("Failed to parse config file")
+        toml::from_str(&config_content).expect("Failed to parse config file");
+        Config::default;
+        config;
     }
-}
+}*/
 
 /// Get song information, including title, player name, and progress percentage.
-fn get_pl(player: &Player) -> Option<(String, String, f64, f64, String)> {
+fn get_pl(player: &Player, cache: &mut Option<PlayerCache>) -> Option<PlayerCache> {
     if let Ok(metadata) = player.get_metadata() {
-        let title = metadata.title().unwrap_or("Unkown or Unamed Title").to_string();
+        let title = metadata.title().unwrap_or("Unknown Title").to_string();
         let player_name = player.identity().to_string();
         let length = metadata.length().map_or(0.0, |l| l.as_secs_f64());
         let position = player.get_position().map_or(0.0, |p| p.as_secs_f64());
         let progress = if length > 0.0 { position / length } else { 0.0 };
-        let volume = match player.get_volume(){Ok(volval) => volval*100.0 as f64,Err(_) => 22.0,};
-        //let playback = match player.get_playback_status() {
-        //    Ok(status) => format!("{:?}", status), // Assuming `PlaybackStatus` can be formatted via Debug
-        //    Err(e) => format!("Error: {}", e),     // Print error if the call fails
-        //};
-        let playback= ("not implemented").to_string();
-        Some((title, player_name, progress, volume, playback))
-    } else {
-        None
+        let volume = player.get_volume().unwrap_or(0.22) * 100.0;
+        let playback = "not implemented".to_string();
+
+        let new_cache = PlayerCache {
+            title,
+            player_name,
+            progress,
+            volume,
+            playback,
+        };
+        *cache = Some(new_cache);
     }
+    cache.clone()
 }
 
 
@@ -128,7 +178,7 @@ fn set_vol(players: &[Player], change: f64, selected_index: usize) {
 
 
 // DO proper indexing and rewrite of the main function
-
+// added undocumented color schem nc means no color
 
 fn color_from_string(color_str: &str) -> Color {
     match color_str.to_lowercase().as_str() {
@@ -142,6 +192,7 @@ fn color_from_string(color_str: &str) -> Color {
         "white" => Color::White,
         "grey" => Color::Gray,
         "gray" => Color::Gray,
+        "nc" => Color::Reset,
         _ => Color::Reset,  // Default to Reset if the color is not recognized
     }
 }
@@ -160,25 +211,67 @@ fn main() -> Result<()> {
 
     // Initialize PlayerFinder
     let finder = PlayerFinder::new().unwrap();
+    let mut caches: Vec<Option<PlayerCache>> = Vec::new();
+    let mut last_update = Instant::now();
+    let refresh_interval = Duration::from_millis(3000); // Adjust frequency
+    let mut last_player_refresh = Instant::now();
+    let mut last_draw = Instant::now();
 
     // Load Variables
     let mut selected_index = 0;
     let mut scroll_offset = 0;
-    let display_limit = 16; // Number of players to display at once bumped from 5 to 16
+    let display_limit = 16;
 
-    //Load variables
     let mut eval = false;
     let volscopechange = 0.05;
     let mut page = config.startpage;
+    let mut players = finder.find_all().unwrap_or_default();
+    if caches.len() != players.len() {
+            caches.resize_with(players.len(), || None);
+    }
+    if !players.is_empty() && selected_index >= players.len() {
+       selected_index = players.len() - 1;
+    }
+
+        let mut last_refresh = Instant::now();
+    if last_update.elapsed() >= refresh_interval {
+        let mut players = finder.find_all().unwrap_or_default();
+        if caches.len() != players.len() {
+            caches.resize_with(players.len(), || None);
+        }
+        if !players.is_empty() && selected_index >= players.len() {
+           selected_index = players.len() - 1;
+        }
+        // Update each player's cache
+        for (i, player) in players.iter().enumerate() {
+            get_pl(player, &mut caches[i]);
+        }
+        last_update = Instant::now();
+    }
 
     loop {
+    if last_player_refresh.elapsed() >= Duration::from_secs(1) {
+        players = finder.find_all().unwrap_or_default();
+
+        if caches.len() != players.len() {
+            caches.resize_with(players.len(), || None);
+        }
+
+        for (i, player) in players.iter().enumerate() {
+            get_pl(player, &mut caches[i]); // DBus query
+        }
+
+        last_player_refresh = Instant::now();
+    }
+    
     if page == "sink"{
         let mut page = "sink".to_string();
         
         }
+        }
         else{
             // Refresh the list of active players
-            let players: Vec<Player> = finder.find_all().unwrap_or_else(|_| vec![]);
+            let mut players: Vec<Player> = finder.find_all().unwrap_or_else(|_| vec![]);
             let num_players = players.len();
             let notplaying_fg = color_from_string(&config.notplaying_fg);
             let notplaying_bg = color_from_string(&config.notplaying_bg);
@@ -186,8 +279,18 @@ fn main() -> Result<()> {
             // Check if there are active players
             if num_players == 0 {
                 loop {
-                let players: Vec<Player> = finder.find_all().unwrap_or_else(|_| vec![]);
+                // Refresh player list at most once per second
+                if last_refresh.elapsed() > Duration::from_secs(1) {
+                    last_refresh = Instant::now();
+                    players = finder.find_all().unwrap_or_else(|_| vec![]);
+                }
+
+                // Ensure cache vector has same length as players
+                while caches.len() < players.len() {
+                    caches.push(None);
+                }
                 let num_players = players.len();
+
                 audio.draw(|f| {
                     let size = f.size();
                     let nothingplayingblock = Paragraph::new("Not Playing")
@@ -235,32 +338,44 @@ fn main() -> Result<()> {
                     .constraints(
                         [
                             Constraint::Length(3),  // Header
-                            Constraint::Min(4),    // Player list
+                            Constraint::Min(4),     // Player list
                             Constraint::Length(3),  // Controls
-                        ].as_ref()
+                        ]
+                        .as_ref(),
                     )
                     .split(f.size());
 
                     let top_fg = color_from_string(&config.top_fg);
                     let top_bg = color_from_string(&config.top_bg);
                     let bottom_fg = color_from_string(&config.bottom_fg);
-                    let bottom_bg = color_from_string(&config.bottom_bg);  
+                    let bottom_bg = color_from_string(&config.bottom_bg);
 
-                // Display the selected player's info in the header
-                if let Some(player) = players.get(selected_index) {
-                    if let Some((title, player_name, progress, volume, playback)) = get_pl(player) {
-                        let rounding = config.rounding;
-                        let mut volnice = 0.0;
-                        drop(playback);
-                        if rounding == true {volnice = volume.round();}
-                        if rounding == false {volnice = volume;}
-                        let header_text = format!("{} - ({}) - {:.0}% - V: {}%", player_name, title, progress * 100.0, volnice);
-                        let header = Paragraph::new(header_text)
-                            .block(Block::default().borders(Borders::ALL).title("Currently Selected"))
-                            .style(Style::default().fg(top_fg).bg(top_bg));
-                        f.render_widget(header, chunks[0]);
-                    }
-                }
+    // Display selected player in header
+    if let Some(player) = players.get(selected_index) {
+        if let Some(pl) = get_pl(player, &mut caches[selected_index]) {
+            let title = &pl.title;
+            let player_name = &pl.player_name;
+            let progress = pl.progress;
+            let mut volume = pl.volume;
+
+            let rounding = config.rounding;
+            if rounding {
+                volume = volume.round();
+            }
+
+            let header_text = format!(
+                "{} - ({}) - {:.0}% - V: {}%",
+                player_name,
+                title,
+                progress * 100.0,
+                volume
+            );
+            let header = Paragraph::new(header_text)
+                .block(Block::default().borders(Borders::ALL).title("Currently Selected"))
+                .style(Style::default().fg(top_fg).bg(top_bg));
+            f.render_widget(header, chunks[0]);
+        }
+    }
 
                 let selected_fg = color_from_string(&config.selected_fg);
                 let selected_bg = color_from_string(&config.selected_bg);
@@ -269,7 +384,12 @@ fn main() -> Result<()> {
 
                 // Render each player as a Gauge
                 let player_gauges: Vec<Gauge> = players.iter().enumerate().map(|(i, player)| {
-                    if let Some((title, app_name, progress, volume, playback)) = get_pl(player) {
+                    if let Some(pl) = get_pl(player, &mut caches[i]) {
+                        let title = &pl.title;
+                        let app_name = &pl.player_name;
+                        let progress = pl.progress;
+                        let volume = pl.volume;
+                        let playback = &pl.playback;
                         Gauge::default()
                             .block(Block::default().title(format!("{} - ({}) - V: {}% - {}", title, app_name, volume.round(), playback)))
                             .gauge_style(Style::default().fg(if i == selected_index { selected_fg } else { unselected_fg }).bg(if i == selected_index { selected_bg } else { unselected_bg }))
