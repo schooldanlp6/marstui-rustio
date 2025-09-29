@@ -5,11 +5,9 @@ use tui::{
 use crossterm::{
     event::{self, KeyCode}, execute, style::Print, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}
 };
-use zbus::{zvariant::Str, Result};
+use zbus::Result;
 use std::io::{self};
 use mpris::{PlaybackStatus, Player, PlayerFinder};
-use std::process::Command;
-use std::mem::drop;
 use std::time::Instant;
 
 mod config;

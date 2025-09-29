@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{fs,path::PathBuf,time::Instant,};
 
+use crate::config;
+
 /// Configuration structure for the application
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(default)]
@@ -70,13 +72,13 @@ pub fn load_config() -> Config {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("marstui/audio.toml");
 
-    if !config_path.exists() {
+    let config = if !config_path.exists() {
         // Config doesn't exist, write default
-        let default_config = Config::default();
-        let config_toml = toml::to_string(&default_config).unwrap();
+        let config = Config::default();
+        let config_toml = toml::to_string(&config).unwrap();
         fs::create_dir_all(config_path.parent().unwrap()).expect("Failed to create config directory");
         fs::write(&config_path, config_toml).expect("Failed to write default config file");
-        default_config
+        config
     } else {
         // Config exists, try to read & parse
         let config_content = fs::read_to_string(&config_path).unwrap_or_default();
@@ -93,5 +95,6 @@ pub fn load_config() -> Config {
                 Config::default()
             }
         }
-    }
+    };
+    config
 }
